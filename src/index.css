@@ -1,0 +1,86 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root {
+  --bg-primary: #0c0c0e;
+  --bg-secondary: #16161a;
+  --bg-tertiary: #22222a;
+  --accent-color: #ff2d55;
+  --accent-color-hover: #fa243c;
+  --text-primary: #ffffff;
+  --text-secondary: #8e8e93;
+  --text-tertiary: #55555c;
+  --border-color: rgba(255, 255, 255, 0.08);
+  --glass-bg: rgba(20, 20, 25, 0.6);
+  --glass-bg-hover: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --sidebar-width: 260px;
+  --player-height: 88px;
+  --nav-height: 0px;
+}
+
+@media (max-width: 768px) {
+  :root {
+    --player-height: 72px;
+    --nav-height: 60px;
+  }
+}
+
+/* Realme 7: 1080×2400, 20:9, DPR ≈ 2.625 → ~412px CSS width */
+@media (max-width: 430px) {
+  :root {
+    --player-height: 68px;
+    --nav-height: 58px;
+  }
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+  /* Prevent text size adjustment on mobile */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Momentum scrolling on iOS */
+.main-content,
+.sidebar-menu,
+.carousel-container,
+.songs-list-container,
+.lyrics-right-scroller {
+  -webkit-overflow-scrolling: touch;
+}
+
