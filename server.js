@@ -43,7 +43,8 @@ DIRS.forEach(dir => {
 // Serve static uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-const DB_PATH = path.join(__dirname, 'db.json');
+const DB_PATH = path.join(__dirname, 'uploads', 'db.json');
+
 
 // Helper to read database and auto-generate secret keys
 function readDB() {
@@ -904,6 +905,15 @@ app.post('/api/songs/:id/lyrics', authenticateToken, (req, res) => {
   writeDB(db);
   res.json(song);
 });
+
+// Serve frontend in production
+const distPath = path.join(__dirname, 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`Secure Cloud audio server running on port ${PORT}`);
