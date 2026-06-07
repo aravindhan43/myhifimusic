@@ -408,13 +408,13 @@ app.post('/api/admin/users/:username/reject', authenticateAdmin, (req, res) => {
   res.json({ success: true, message: 'User rejected' });
 });
 
-app.put('/api/admin/users/:username', authenticateAdmin, (req, res) => {
+app.put('/api/admin/users/:username', authenticateAdmin, async (req, res) => {
   const db = readDB();
   const users = getUsers(db);
   const user = users.find(u => u.username === req.params.username);
   if (!user) return res.status(404).json({ error: 'User not found' });
   
-  const { email, role, status } = req.body;
+  const { email, role, status, password } = req.body;
   
   // Basic protection to prevent demoting the owner
   if (db.settings && db.settings.owner && user.username === db.settings.owner.username) {
@@ -426,6 +426,13 @@ app.put('/api/admin/users/:username', authenticateAdmin, (req, res) => {
   if (email !== undefined) user.email = email;
   if (role !== undefined) user.role = role;
   if (status !== undefined) user.status = status;
+  if (password) {
+    user.password = await bcrypt.hash(password, 10);
+    // Sync owner password if resetting owner
+    if (db.settings && db.settings.owner && user.username === db.settings.owner.username) {
+      db.settings.owner.password = user.password;
+    }
+  }
   
   writeDB(db);
   res.json({ success: true, user: { username: user.username, email: user.email, role: user.role, status: user.status } });

@@ -17,7 +17,7 @@ export default function AdminPanel() {
   const [errorMsg, setErrorMsg] = useState('');
   
   const [editingUser, setEditingUser] = useState(null);
-  const [editFormData, setEditFormData] = useState({ email: '', role: '', status: '' });
+  const [editFormData, setEditFormData] = useState({ email: '', role: '', status: '', password: '' });
 
   useEffect(() => {
     fetchUsers();
@@ -89,7 +89,7 @@ export default function AdminPanel() {
 
   const startEdit = (user) => {
     setEditingUser(user.username);
-    setEditFormData({ email: user.email === 'N/A' ? '' : user.email || '', role: user.role, status: user.status });
+    setEditFormData({ email: user.email === 'N/A' ? '' : user.email || '', role: user.role, status: user.status, password: '' });
   };
 
   const saveEdit = async (username) => {
@@ -199,7 +199,7 @@ export default function AdminPanel() {
                 borderTop: '1px solid rgba(255,255,255,0.1)',
                 display: 'grid',
                 gap: '12px',
-                gridTemplateColumns: '1fr 1fr 1fr auto',
+                gridTemplateColumns: '1fr 1fr 1fr 1fr auto',
                 alignItems: 'end'
               }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -208,6 +208,16 @@ export default function AdminPanel() {
                     type="email" 
                     value={editFormData.email} 
                     onChange={e => setEditFormData({ ...editFormData, email: e.target.value })}
+                    style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '8px', borderRadius: '6px' }}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>New Password</label>
+                  <input 
+                    type="password"
+                    placeholder="Leave blank to keep current"
+                    value={editFormData.password} 
+                    onChange={e => setEditFormData({ ...editFormData, password: e.target.value })}
                     style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '8px', borderRadius: '6px' }}
                   />
                 </div>
