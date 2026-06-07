@@ -245,6 +245,9 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const isFirstUser = users.length === 0;
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log(`\n================================`);
+    console.log(`[DEV ONLY] Email Authentication Code for ${email}: ${verificationCode}`);
+    console.log(`================================\n`);
     
     users.push({ 
       username, 
