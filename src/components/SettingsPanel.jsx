@@ -222,6 +222,17 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
           <li>Copy and paste them above, save, and enjoy infinite cloud streaming!</li>
         </ol>
       </div>
+
+      <div style={{ marginTop: '16px', background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.04)' }}>
+        <h4 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#fff' }}>How to set up Gmail App Password:</h4>
+        <ol style={{ fontSize: '12px', color: 'var(--text-secondary)', paddingLeft: '16px', display: 'flex', flexDirection: 'column', gap: '8px', lineHeight: '1.4' }}>
+          <li>Go to your Google Account and ensure <strong>2-Step Verification</strong> is turned on.</li>
+          <li>Search for <strong>App Passwords</strong> in your Google Account search bar.</li>
+          <li>Create a new app password (select "Other (Custom name)" and type "MyHIF App").</li>
+          <li>Google will generate a 16-character password (e.g. <code style={{background: '#000', padding: '2px 4px', borderRadius: '4px'}}>abcd efgh ijkl mnop</code>).</li>
+          <li>Paste the 16 characters (without spaces) into the "Gmail App Password" field above and save!</li>
+        </ol>
+      </div>
     </div>
   );
 }

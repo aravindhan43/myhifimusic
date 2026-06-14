@@ -11,6 +11,11 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import rateLimit from 'express-rate-limit';
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,65 +48,135 @@ DIRS.forEach(dir => {
 // Serve static uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-const DB_PATH = path.join(__dirname, 'uploads', 'db.json');
+// --- Mongoose Schemas & Models ---
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  role: { type: String, default: 'user' },
+  status: { type: String, default: 'pending' },
+  isVerified: { type: Boolean, default: false },
+  verificationCode: String,
+  failedVerifyAttempts: { type: Number, default: 0 }
+});
+const User = mongoose.model('User', userSchema);
 
+const songSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  title: { type: String, default: 'Untitled Song' },
+  artist: { type: String, default: 'Unknown Artist' },
+  album: { type: String, default: 'Unknown Album' },
+  genre: { type: String, default: 'Unknown Genre' },
+  duration: { type: Number, default: 0 },
+  audioUrl: String,
+  coverUrl: String,
+  audioPublicId: String,
+  coverPublicId: String,
+  isCloud: { type: Boolean, default: false },
+  username: { type: String, required: true },
+  lyrics: { type: String, default: '' },
+  createdAt: { type: Date, default: Date.now }
+});
+const Song = mongoose.model('Song', songSchema);
 
-// Helper to read database and auto-generate secret keys
-function readDB() {
-  try {
-    if (!fs.existsSync(DB_PATH)) {
-      const jwtSecret = crypto.randomBytes(32).toString('hex');
-      const initial = { 
-        songs: [], 
-        playlists: [], 
-        users: [],
-        settings: { 
-          cloudinaryCloudName: '', 
-          cloudinaryApiKey: '', 
-          cloudinaryApiSecret: '', 
-          jwtSecret 
-        } 
-      };
-      fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
-      return initial;
+const playlistSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  description: { type: String, default: '' },
+  songIds: [String],
+  username: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+const Playlist = mongoose.model('Playlist', playlistSchema);
+
+const settingsSchema = new mongoose.Schema({
+  cloudinaryCloudName: { type: String, default: '' },
+  cloudinaryApiKey: { type: String, default: '' },
+  cloudinaryApiSecret: { type: String, default: '' },
+  jwtSecret: { type: String, default: '' },
+  gmailUser: { type: String, default: '' },
+  gmailAppPassword: { type: String, default: '' }
+});
+const Settings = mongoose.model('Settings', settingsSchema);
+
+// --- Database Connection ---
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/myhifimusic';
+mongoose.connect(MONGO_URI)
+  .then(async () => {
+    console.log('MongoDB connected successfully');
+    await migrateLegacyDB();
+    await configureCloudinary();
+  })
+  .catch(err => console.error('MongoDB connection error:', err));
+
+// --- Legacy Migration ---
+async function migrateLegacyDB() {
+  const DB_PATH = path.join(__dirname, 'uploads', 'db.json');
+  if (fs.existsSync(DB_PATH)) {
+    try {
+      console.log('Found legacy db.json. Migrating to MongoDB...');
+      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+      
+      let currentSettings = await Settings.findOne();
+      if (!currentSettings) {
+         currentSettings = new Settings(data.settings || {});
+         if (!currentSettings.jwtSecret) currentSettings.jwtSecret = crypto.randomBytes(32).toString('hex');
+         await currentSettings.save();
+      }
+
+      if (data.users && data.users.length > 0) {
+         for (const u of data.users) {
+            const exists = await User.findOne({ username: u.username });
+            if (!exists) {
+               await User.create({
+                 username: u.username,
+                 email: u.email || `${u.username}@example.com`, // Email was added later, fill if missing
+                 password: u.password,
+                 role: u.role || 'user',
+                 status: u.status || 'approved',
+                 isVerified: u.isVerified !== false,
+                 verificationCode: u.verificationCode || null
+               });
+            }
+         }
+      }
+      if (data.songs && data.songs.length > 0) {
+         for (const s of data.songs) {
+            const exists = await Song.findOne({ id: s.id });
+            if (!exists) await Song.create(s);
+         }
+      }
+      if (data.playlists && data.playlists.length > 0) {
+         for (const p of data.playlists) {
+            const exists = await Playlist.findOne({ id: p.id });
+            if (!exists) await Playlist.create(p);
+         }
+      }
+      // Rename to avoid running again
+      fs.renameSync(DB_PATH, DB_PATH + '.migrated');
+      console.log('Legacy DB migration complete.');
+    } catch (e) {
+      console.error('Migration failed:', e);
     }
-    const data = fs.readFileSync(DB_PATH, 'utf8');
-    const parsed = JSON.parse(data);
-    
-    // Auto-generate key if missing (backward compatibility)
-    if (parsed.settings && !parsed.settings.jwtSecret) {
-      parsed.settings.jwtSecret = crypto.randomBytes(32).toString('hex');
-      fs.writeFileSync(DB_PATH, JSON.stringify(parsed, null, 2));
-    }
-    return parsed;
-  } catch (err) {
-    console.error('Error reading DB:', err);
-    return { 
-      songs: [], 
-      playlists: [], 
-      settings: { 
-        cloudinaryCloudName: '', 
-        cloudinaryApiKey: '', 
-        cloudinaryApiSecret: '', 
-        jwtSecret: 'default_fallback_secret_1289471' 
-      } 
-    };
   }
 }
 
-// Helper to write database
-function writeDB(data) {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-  } catch (err) {
-    console.error('Error writing DB:', err);
+// --- Helper Functions ---
+async function getSettings() {
+  let settings = await Settings.findOne();
+  if (!settings) {
+    const jwtSecret = crypto.randomBytes(32).toString('hex');
+    settings = await Settings.create({ jwtSecret });
+  } else if (!settings.jwtSecret) {
+    settings.jwtSecret = crypto.randomBytes(32).toString('hex');
+    await settings.save();
   }
+  return settings;
 }
 
-// Configure Cloudinary from DB settings
-function configureCloudinary() {
-  const db = readDB();
-  const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret } = db.settings || {};
+async function configureCloudinary() {
+  const settings = await getSettings();
+  const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret } = settings;
   if (cloudinaryCloudName && cloudinaryApiKey && cloudinaryApiSecret) {
     cloudinary.config({
       cloud_name: cloudinaryCloudName,
@@ -116,11 +191,8 @@ function configureCloudinary() {
   return false;
 }
 
-// Initialize Cloudinary configuration on boot
-configureCloudinary();
-
 // --- SECURE AUTHORIZATION MIDDLEWARE ---
-function authenticateToken(req, res, next) {
+async function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer <token>
   
@@ -128,8 +200,8 @@ function authenticateToken(req, res, next) {
     return res.status(401).json({ error: 'Access token required. Please sign in.' });
   }
   
-  const db = readDB();
-  const jwtSecret = (db.settings && db.settings.jwtSecret) || 'default_fallback_secret_1289471';
+  const settings = await getSettings();
+  const jwtSecret = settings.jwtSecret || 'default_fallback_secret_1289471';
 
   jwt.verify(token, jwtSecret, (err, user) => {
     if (err) {
@@ -140,12 +212,11 @@ function authenticateToken(req, res, next) {
   });
 }
 
-function authenticateAdmin(req, res, next) {
-  authenticateToken(req, res, () => {
-    const db = readDB();
-    const users = getUsers(db);
-    const dbUser = users.find(u => u.username === req.user.username);
-    if (!dbUser || dbUser.role !== 'admin') {
+async function authenticateAdmin(req, res, next) {
+  authenticateToken(req, res, async () => {
+    if (!req.user) return; // handled by authenticateToken
+    const user = await User.findOne({ username: req.user.username });
+    if (!user || user.role !== 'admin') {
       return res.status(403).json({ error: 'Admin access required.' });
     }
     next();
@@ -154,59 +225,10 @@ function authenticateAdmin(req, res, next) {
 
 // --- API ROUTES ---
 
-// Helper to ensure users array exists and migrate legacy owner
-function getUsers(db) {
-  db.users = db.users || [];
-  if (db.settings && db.settings.owner && db.settings.owner.username) {
-    if (!db.users.find(u => u.username === db.settings.owner.username)) {
-      db.users.push({
-        username: db.settings.owner.username,
-        password: db.settings.owner.password,
-        role: 'admin',
-        status: 'approved'
-      });
-    }
-  }
-  // Ensure existing migrated users have roles
-  db.users.forEach(u => {
-    if (db.settings && db.settings.owner && u.username === db.settings.owner.username) {
-      u.role = 'admin';
-    } else if (!u.role) {
-      u.role = 'user';
-    }
-    if (!u.status) u.status = 'approved'; // Default to approved for pre-existing accounts
-    if (u.isVerified === undefined) u.isVerified = true; // Legacy users are auto-verified
-  });
-
-  // Data Migration for Separate User Accounts
-  let migrated = false;
-  const adminUsername = db.users.length > 0 ? (db.users.find(u => u.role === 'admin')?.username || db.users[0].username) : 'admin';
-  if (db.songs) {
-    db.songs.forEach(s => {
-      if (!s.username) {
-        s.username = adminUsername;
-        migrated = true;
-      }
-    });
-  }
-  if (db.playlists) {
-    db.playlists.forEach(p => {
-      if (!p.username) {
-        p.username = adminUsername;
-        migrated = true;
-      }
-    });
-  }
-  if (migrated) writeDB(db);
-
-  return db.users;
-}
-
 // 0. Authentication Routes
-app.get('/api/auth/status', (req, res) => {
-  const db = readDB();
-  const users = getUsers(db);
-  res.json({ registered: users.length > 0 });
+app.get('/api/auth/status', async (req, res) => {
+  const count = await User.countDocuments();
+  res.json({ registered: count > 0 });
 });
 
 const authLimiter = rateLimit({
@@ -231,48 +253,46 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Registration is restricted to @gmail.com addresses only.' });
   }
 
-  const db = readDB();
-  const users = getUsers(db);
+  const existingUser = await User.findOne({ username });
+  if (existingUser) return res.status(400).json({ error: 'Username already exists' });
   
-  if (users.find(u => u.username === username)) {
-    return res.status(400).json({ error: 'Username already exists' });
-  }
-  if (users.find(u => u.email === email)) {
-    return res.status(400).json({ error: 'Email already registered' });
-  }
+  const existingEmail = await User.findOne({ email });
+  if (existingEmail) return res.status(400).json({ error: 'Email already registered' });
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    const isFirstUser = users.length === 0;
+    const count = await User.countDocuments();
+    const isFirstUser = count === 0;
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    
     console.log(`\n================================`);
     console.log(`[DEV ONLY] Email Authentication Code for ${email}: ${verificationCode}`);
     console.log(`================================\n`);
     
-    users.push({ 
+    await User.create({ 
       username, 
       email,
       password: hashedPassword,
       role: isFirstUser ? 'admin' : 'user',
       status: isFirstUser ? 'approved' : 'pending',
-      isVerified: false,
-      verificationCode
+      isVerified: isFirstUser ? true : false,
+      verificationCode: isFirstUser ? null : verificationCode
     });
-    db.users = users;
-    writeDB(db);
     
-    // Try to send real email if credentials exist, otherwise mock
-    const gmailUser = db.settings && db.settings.gmailUser;
-    const gmailAppPassword = db.settings && db.settings.gmailAppPassword;
+    // If it's the admin, skip email verification entirely
+    if (isFirstUser) {
+      return res.json({ success: true, message: 'Admin account created successfully.', requiresVerification: false });
+    }
+    
+    // Try to send real email
+    const settings = await getSettings();
+    const { gmailUser, gmailAppPassword } = settings;
 
     if (gmailUser && gmailAppPassword) {
       try {
         const transporter = nodemailer.createTransport({
           service: 'gmail',
-          auth: {
-            user: gmailUser,
-            pass: gmailAppPassword
-          }
+          auth: { user: gmailUser, pass: gmailAppPassword }
         });
         
         await transporter.sendMail({
@@ -284,19 +304,9 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
         console.log(`✉️ Real email sent to ${email} via Nodemailer`);
       } catch (emailErr) {
         console.error('Failed to send real email, falling back to mock:', emailErr.message);
-        console.log(`\n=========================================`);
-        console.log(`✉️ MOCK EMAIL SENT (Fallback)`);
-        console.log(`To: ${email}`);
-        console.log(`Verification Code: ${verificationCode}`);
-        console.log(`=========================================\n`);
       }
     } else {
-      // Mock sending email by logging to console
-      console.log(`\n=========================================`);
-      console.log(`✉️ MOCK EMAIL SENT`);
-      console.log(`To: ${email}`);
-      console.log(`Verification Code: ${verificationCode}`);
-      console.log(`=========================================\n`);
+      console.log(`✉️ MOCK EMAIL SENT to ${email}`);
     }
     
     res.json({ success: true, message: 'Verification code sent to email', requiresVerification: true });
@@ -305,56 +315,44 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/auth/verify', verifyLimiter, (req, res) => {
+app.post('/api/auth/verify', verifyLimiter, async (req, res) => {
   const { email, code } = req.body;
   if (!email || !code) return res.status(400).json({ error: 'Email and code are required' });
 
-  const db = readDB();
-  const users = getUsers(db);
-  const user = users.find(u => u.email === email);
+  const user = await User.findOne({ email });
+  if (!user) return res.status(400).json({ error: 'User not found' });
+  if (user.isVerified) return res.status(400).json({ error: 'Account is already verified' });
 
-  if (!user) {
-    return res.status(400).json({ error: 'User not found' });
-  }
-  if (user.isVerified) {
-    return res.status(400).json({ error: 'Account is already verified' });
-  }
   if (user.verificationCode !== code) {
-    user.failedVerifyAttempts = (user.failedVerifyAttempts || 0) + 1;
+    user.failedVerifyAttempts += 1;
     if (user.failedVerifyAttempts >= 5) {
       user.verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
       user.failedVerifyAttempts = 0;
-      db.users = users;
-      writeDB(db);
+      await user.save();
       return res.status(400).json({ error: 'Too many failed attempts. A new code has been sent/generated.' });
     }
-    db.users = users;
-    writeDB(db);
+    await user.save();
     return res.status(400).json({ error: 'Invalid verification code' });
   }
 
   user.isVerified = true;
-  user.verificationCode = null; // Clear the code once verified
+  user.verificationCode = null;
   user.failedVerifyAttempts = 0;
-  db.users = users;
-  writeDB(db);
+  await user.save();
 
   res.json({ success: true, message: 'Account verified successfully. You can now sign in.' });
 });
 
 app.post('/api/auth/login', authLimiter, async (req, res) => {
   const { username, password } = req.body;
-  const db = readDB();
-  const users = getUsers(db);
   
-  const user = users.find(u => u.username === username || (u.email && u.email === username));
+  const user = await User.findOne({ $or: [{ username }, { email: username }] });
   if (!user) {
     return res.status(401).json({ error: 'Invalid username/email or password' });
   }
 
   try {
     const isMatch = await bcrypt.compare(password, user.password);
-    
     if (isMatch) {
       if (user.isVerified === false) {
         return res.status(403).json({ error: 'Please verify your email address before logging in.' });
@@ -366,7 +364,8 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
         return res.status(403).json({ error: 'Your account registration was rejected.' });
       }
       
-      const jwtSecret = (db.settings && db.settings.jwtSecret) || 'default_fallback_secret_1289471';
+      const settings = await getSettings();
+      const jwtSecret = settings.jwtSecret || 'default_fallback_secret_1289471';
       const token = jwt.sign({ username: user.username, role: user.role }, jwtSecret, { expiresIn: '7d' });
       res.json({ success: true, token, role: user.role, username: user.username });
     } else {
@@ -378,144 +377,102 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
 });
 
 // 0.5 Admin Routes
-app.get('/api/admin/users', authenticateAdmin, (req, res) => {
-  const db = readDB();
-  const users = getUsers(db).map(u => ({ 
-    username: u.username, 
-    email: u.email || 'N/A',
-    role: u.role, 
-    status: u.status 
-  }));
+app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
+  const users = await User.find({}, 'username email role status');
   res.json(users);
 });
 
-app.post('/api/admin/users/:username/approve', authenticateAdmin, (req, res) => {
-  const db = readDB();
-  const users = getUsers(db);
-  const user = users.find(u => u.username === req.params.username);
+app.post('/api/admin/users/:username/approve', authenticateAdmin, async (req, res) => {
+  const user = await User.findOneAndUpdate({ username: req.params.username }, { status: 'approved' }, { new: true });
   if (!user) return res.status(404).json({ error: 'User not found' });
-  
-  user.status = 'approved';
-  writeDB(db);
   res.json({ success: true, user: { username: user.username, role: user.role, status: user.status } });
 });
 
-app.post('/api/admin/users/:username/reject', authenticateAdmin, (req, res) => {
-  const db = readDB();
-  let users = getUsers(db);
-  const userIndex = users.findIndex(u => u.username === req.params.username);
-  if (userIndex === -1) return res.status(404).json({ error: 'User not found' });
-  
-  users[userIndex].status = 'rejected';
-  writeDB(db);
+app.post('/api/admin/users/:username/reject', authenticateAdmin, async (req, res) => {
+  const user = await User.findOneAndUpdate({ username: req.params.username }, { status: 'rejected' }, { new: true });
+  if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ success: true, message: 'User rejected' });
 });
 
 app.put('/api/admin/users/:username', authenticateAdmin, async (req, res) => {
-  const db = readDB();
-  const users = getUsers(db);
-  const user = users.find(u => u.username === req.params.username);
+  const user = await User.findOne({ username: req.params.username });
   if (!user) return res.status(404).json({ error: 'User not found' });
   
   const { email, role, status, password } = req.body;
-  
-  // Basic protection to prevent demoting the owner
-  if (db.settings && db.settings.owner && user.username === db.settings.owner.username) {
-    if (role && role !== 'admin') {
-      return res.status(400).json({ error: 'Cannot change the role of the primary owner' });
-    }
-  }
-
   if (email !== undefined) user.email = email;
   if (role !== undefined) user.role = role;
   if (status !== undefined) user.status = status;
   if (password) {
     user.password = await bcrypt.hash(password, 10);
-    // Sync owner password if resetting owner
-    if (db.settings && db.settings.owner && user.username === db.settings.owner.username) {
-      db.settings.owner.password = user.password;
-    }
   }
   
-  writeDB(db);
+  await user.save();
   res.json({ success: true, user: { username: user.username, email: user.email, role: user.role, status: user.status } });
 });
 
 app.delete('/api/admin/users/:username', authenticateAdmin, async (req, res) => {
-  const db = readDB();
-  const users = getUsers(db);
   const username = req.params.username;
-  const userIndex = users.findIndex(u => u.username === username);
+  const user = await User.findOne({ username });
+  if (!user) return res.status(404).json({ error: 'User not found' });
   
-  if (userIndex === -1) return res.status(404).json({ error: 'User not found' });
-  
-  if (db.settings && db.settings.owner && username === db.settings.owner.username) {
-    return res.status(400).json({ error: 'Cannot delete the primary owner' });
-  }
-  
-  // Cleanup user's songs and playlists
-  const isCloudConfigured = configureCloudinary();
-  if (db.songs) {
-    const userSongs = db.songs.filter(s => s.username === username);
-    for (const song of userSongs) {
-      try {
-        if (song.isCloud && isCloudConfigured) {
-          if (song.audioPublicId) await cloudinary.uploader.destroy(song.audioPublicId, { resource_type: 'video' });
-          if (song.coverPublicId) await cloudinary.uploader.destroy(song.coverPublicId);
-        } else {
-          if (song.audioUrl && song.audioUrl.startsWith('/uploads/songs/')) {
-            const audioPath = path.join(__dirname, song.audioUrl);
-            if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
-          }
-          if (song.coverUrl && song.coverUrl.startsWith('/uploads/covers/')) {
-            const coverPath = path.join(__dirname, song.coverUrl);
-            if (fs.existsSync(coverPath)) fs.unlinkSync(coverPath);
-          }
+  const userSongs = await Song.find({ username });
+  for (const song of userSongs) {
+    try {
+      if (song.isCloud) {
+        if (song.audioPublicId) await cloudinary.uploader.destroy(song.audioPublicId, { resource_type: 'video' });
+        if (song.coverPublicId) await cloudinary.uploader.destroy(song.coverPublicId);
+      } else {
+        if (song.audioUrl && song.audioUrl.startsWith('/uploads/songs/')) {
+          const audioPath = path.join(__dirname, song.audioUrl);
+          if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
         }
-      } catch (e) {
-        console.error('Error cleaning up song:', song.id, e);
+        if (song.coverUrl && song.coverUrl.startsWith('/uploads/covers/')) {
+          const coverPath = path.join(__dirname, song.coverUrl);
+          if (fs.existsSync(coverPath)) fs.unlinkSync(coverPath);
+        }
       }
+    } catch (e) {
+      console.error('Error cleaning up song:', song.id, e);
     }
-    db.songs = db.songs.filter(s => s.username !== username);
   }
+  await Song.deleteMany({ username });
+  await Playlist.deleteMany({ username });
+  await User.deleteOne({ username });
   
-  if (db.playlists) {
-    db.playlists = db.playlists.filter(p => p.username !== username);
-  }
-  
-  db.users.splice(userIndex, 1);
-  writeDB(db);
   res.json({ success: true, message: 'User and their data deleted successfully' });
 });
 
 // 1. Settings Routes
-app.get('/api/settings', authenticateAdmin, (req, res) => {
-  const db = readDB();
-  // Strip out owner credentials and secrets before returning settings
-  const cleanSettings = { ...db.settings };
-  if (cleanSettings.owner) delete cleanSettings.owner;
-  if (cleanSettings.jwtSecret) delete cleanSettings.jwtSecret;
-  if (cleanSettings.gmailAppPassword) delete cleanSettings.gmailAppPassword;
-  if (cleanSettings.cloudinaryApiSecret) delete cleanSettings.cloudinaryApiSecret;
+app.get('/api/settings', authenticateAdmin, async (req, res) => {
+  const settings = await getSettings();
+  const cleanSettings = settings.toObject();
+  delete cleanSettings.jwtSecret;
+  delete cleanSettings.gmailAppPassword;
+  delete cleanSettings.cloudinaryApiSecret;
   res.json(cleanSettings || {});
 });
 
-app.post('/api/settings', authenticateAdmin, (req, res) => {
+app.post('/api/settings', authenticateAdmin, async (req, res) => {
   const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret, gmailUser, gmailAppPassword } = req.body;
-  const db = readDB();
+  const settings = await getSettings();
   
-  db.settings.cloudinaryCloudName = cloudinaryCloudName || '';
-  db.settings.cloudinaryApiKey = cloudinaryApiKey || '';
-  db.settings.cloudinaryApiSecret = cloudinaryApiSecret || '';
-  if (gmailUser !== undefined) db.settings.gmailUser = gmailUser;
-  if (gmailAppPassword !== undefined) db.settings.gmailAppPassword = gmailAppPassword;
+  if (cloudinaryCloudName !== undefined) settings.cloudinaryCloudName = cloudinaryCloudName;
+  if (cloudinaryApiKey !== undefined) settings.cloudinaryApiKey = cloudinaryApiKey;
+  if (cloudinaryApiSecret !== undefined) settings.cloudinaryApiSecret = cloudinaryApiSecret;
+  if (gmailUser !== undefined) settings.gmailUser = gmailUser;
+  if (gmailAppPassword !== undefined) settings.gmailAppPassword = gmailAppPassword;
   
-  writeDB(db);
-  const configured = configureCloudinary();
-  res.json({ success: true, settings: db.settings, configured });
+  await settings.save();
+  const configured = await configureCloudinary();
+  
+  const cleanSettings = settings.toObject();
+  delete cleanSettings.jwtSecret;
+  delete cleanSettings.gmailAppPassword;
+  delete cleanSettings.cloudinaryApiSecret;
+  
+  res.json({ success: true, settings: cleanSettings, configured });
 });
 
-// Test Cloudinary connection
 app.post('/api/settings/test', authenticateToken, async (req, res) => {
   const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret } = req.body;
   if (!cloudinaryCloudName || !cloudinaryApiKey || !cloudinaryApiSecret) {
@@ -626,8 +583,8 @@ app.post('/api/songs/confirm', authenticateToken, async (req, res) => {
     }
   }
 
-  const db = readDB();
-  const isCloudConfigured = configureCloudinary();
+  const settings = await getSettings();
+  const isCloudConfigured = !!(settings.cloudinaryCloudName && settings.cloudinaryApiKey && settings.cloudinaryApiSecret);
 
   let audioUrl = '';
   let coverUrl = '';
@@ -678,11 +635,9 @@ app.post('/api/songs/confirm', authenticateToken, async (req, res) => {
       console.warn('Temp cleanup error:', cleanupErr);
     }
 
-    if (!coverUrl) {
-      coverUrl = '/placeholder-album.png';
-    }
+    if (!coverUrl) coverUrl = '/placeholder-album.png';
 
-    const newSong = {
+    const newSong = await Song.create({
       id: `song_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
       title: title || 'Untitled Song',
       artist: artist || 'Unknown Artist',
@@ -694,12 +649,8 @@ app.post('/api/songs/confirm', authenticateToken, async (req, res) => {
       audioPublicId,
       coverPublicId,
       isCloud: isCloudConfigured,
-      username: req.user.username,
-      createdAt: new Date().toISOString()
-    };
-
-    db.songs.push(newSong);
-    writeDB(db);
+      username: req.user.username
+    });
 
     res.json(newSong);
   } catch (err) {
@@ -708,7 +659,6 @@ app.post('/api/songs/confirm', authenticateToken, async (req, res) => {
   }
 });
 
-// 4. Custom Album Art Upload for Confirm
 app.post('/api/upload-cover', authenticateToken, (req, res) => {
   if (!req.files || !req.files.cover) {
     return res.status(400).json({ error: 'No cover file uploaded' });
@@ -729,33 +679,26 @@ app.post('/api/upload-cover', authenticateToken, (req, res) => {
   });
 });
 
-// 5. Get All Songs
-app.get('/api/songs', authenticateToken, (req, res) => {
-  const db = readDB();
-  const userSongs = (db.songs || []).filter(s => s.username === req.user.username);
-  res.json(userSongs);
+app.get('/api/songs', authenticateToken, async (req, res) => {
+  const songs = await Song.find({ username: req.user.username });
+  res.json(songs);
 });
 
-// 6. Delete Song
 app.delete('/api/songs/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const db = readDB();
-  const songIndex = db.songs.findIndex(s => s.id === id && s.username === req.user.username);
+  const song = await Song.findOne({ id, username: req.user.username });
 
-  if (songIndex === -1) {
+  if (!song) {
     return res.status(404).json({ error: 'Song not found or unauthorized' });
   }
 
-  const song = db.songs[songIndex];
-
   try {
-    if (song.isCloud && configureCloudinary()) {
-      if (song.audioPublicId) {
-        await cloudinary.uploader.destroy(song.audioPublicId, { resource_type: 'video' });
-      }
-      if (song.coverPublicId) {
-        await cloudinary.uploader.destroy(song.coverPublicId);
-      }
+    const settings = await getSettings();
+    const isCloudConfigured = !!(settings.cloudinaryCloudName && settings.cloudinaryApiKey && settings.cloudinaryApiSecret);
+
+    if (song.isCloud && isCloudConfigured) {
+      if (song.audioPublicId) await cloudinary.uploader.destroy(song.audioPublicId, { resource_type: 'video' });
+      if (song.coverPublicId) await cloudinary.uploader.destroy(song.coverPublicId);
     } else {
       if (song.audioUrl && song.audioUrl.startsWith('/uploads/songs/')) {
         const audioPath = path.join(__dirname, song.audioUrl);
@@ -767,17 +710,12 @@ app.delete('/api/songs/:id', authenticateToken, async (req, res) => {
       }
     }
 
-    if (db.playlists) {
-      db.playlists.forEach(pl => {
-        if (pl.songIds) {
-          pl.songIds = pl.songIds.filter(sid => sid !== id);
-        }
-      });
-    }
+    await Playlist.updateMany(
+      { username: req.user.username },
+      { $pull: { songIds: id } }
+    );
 
-    db.songs.splice(songIndex, 1);
-    writeDB(db);
-
+    await Song.deleteOne({ id });
     res.json({ success: true, message: 'Song deleted successfully' });
   } catch (err) {
     console.error('Delete failed:', err);
@@ -786,133 +724,91 @@ app.delete('/api/songs/:id', authenticateToken, async (req, res) => {
 });
 
 // 7. Playlist Routes
-app.get('/api/playlists', authenticateToken, (req, res) => {
-  const db = readDB();
-  const userPlaylists = (db.playlists || []).filter(p => p.username === req.user.username);
-  res.json(userPlaylists);
+app.get('/api/playlists', authenticateToken, async (req, res) => {
+  const playlists = await Playlist.find({ username: req.user.username });
+  res.json(playlists);
 });
 
-app.post('/api/playlists', authenticateToken, (req, res) => {
+app.post('/api/playlists', authenticateToken, async (req, res) => {
   const { name, description } = req.body;
-  if (!name) {
-    return res.status(400).json({ error: 'Playlist name is required' });
-  }
+  if (!name) return res.status(400).json({ error: 'Playlist name is required' });
 
-  const db = readDB();
-  const newPlaylist = {
+  const newPlaylist = await Playlist.create({
     id: `playlist_${Date.now()}`,
     name,
     description: description || '',
     songIds: [],
-    username: req.user.username,
-    createdAt: new Date().toISOString()
-  };
-
-  db.playlists = db.playlists || [];
-  db.playlists.push(newPlaylist);
-  writeDB(db);
+    username: req.user.username
+  });
 
   res.json(newPlaylist);
 });
 
-app.put('/api/playlists/:id', authenticateToken, (req, res) => {
+app.put('/api/playlists/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { name, description } = req.body;
 
-  if (!name) {
-    return res.status(400).json({ error: 'Playlist name is required' });
-  }
+  if (!name) return res.status(400).json({ error: 'Playlist name is required' });
 
-  const db = readDB();
-  const playlist = db.playlists.find(p => p.id === id && p.username === req.user.username);
-
-  if (!playlist) {
-    return res.status(404).json({ error: 'Playlist not found or unauthorized' });
-  }
+  const playlist = await Playlist.findOne({ id, username: req.user.username });
+  if (!playlist) return res.status(404).json({ error: 'Playlist not found or unauthorized' });
 
   playlist.name = name;
-  if (description !== undefined) {
-    playlist.description = description;
-  }
+  if (description !== undefined) playlist.description = description;
 
-  writeDB(db);
+  await playlist.save();
   res.json(playlist);
 });
 
-app.delete('/api/playlists/:id', authenticateToken, (req, res) => {
+app.delete('/api/playlists/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  
-  const db = readDB();
-  const playlistIndex = db.playlists.findIndex(p => p.id === id && p.username === req.user.username);
-
-  if (playlistIndex === -1) {
-    return res.status(404).json({ error: 'Playlist not found or unauthorized' });
-  }
-
-  db.playlists.splice(playlistIndex, 1);
-  writeDB(db);
-
+  const result = await Playlist.deleteOne({ id, username: req.user.username });
+  if (result.deletedCount === 0) return res.status(404).json({ error: 'Playlist not found or unauthorized' });
   res.json({ success: true, message: 'Playlist deleted' });
 });
 
-app.post('/api/playlists/:id/add', authenticateToken, (req, res) => {
+app.post('/api/playlists/:id/add', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { songId } = req.body;
 
-  if (!songId) {
-    return res.status(400).json({ error: 'Song ID is required' });
-  }
+  if (!songId) return res.status(400).json({ error: 'Song ID is required' });
 
-  const db = readDB();
-  const playlist = db.playlists.find(p => p.id === id && p.username === req.user.username);
+  const playlist = await Playlist.findOne({ id, username: req.user.username });
+  if (!playlist) return res.status(404).json({ error: 'Playlist not found or unauthorized' });
 
-  if (!playlist) {
-    return res.status(404).json({ error: 'Playlist not found or unauthorized' });
-  }
-
-  if (!db.songs.some(s => s.id === songId && s.username === req.user.username)) {
-    return res.status(404).json({ error: 'Song not found in library or unauthorized' });
-  }
+  const song = await Song.findOne({ id: songId, username: req.user.username });
+  if (!song) return res.status(404).json({ error: 'Song not found in library or unauthorized' });
 
   if (!playlist.songIds.includes(songId)) {
     playlist.songIds.push(songId);
+    await playlist.save();
   }
 
-  writeDB(db);
   res.json(playlist);
 });
 
-app.post('/api/playlists/:id/remove', authenticateToken, (req, res) => {
+app.post('/api/playlists/:id/remove', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { songId } = req.body;
 
-  const db = readDB();
-  const playlist = db.playlists.find(p => p.id === id && p.username === req.user.username);
-
-  if (!playlist) {
-    return res.status(404).json({ error: 'Playlist not found or unauthorized' });
-  }
+  const playlist = await Playlist.findOne({ id, username: req.user.username });
+  if (!playlist) return res.status(404).json({ error: 'Playlist not found or unauthorized' });
 
   playlist.songIds = playlist.songIds.filter(sid => sid !== songId);
-  writeDB(db);
-
+  await playlist.save();
   res.json(playlist);
 });
 
 // 8. Add Song Lyrics
-app.post('/api/songs/:id/lyrics', authenticateToken, (req, res) => {
+app.post('/api/songs/:id/lyrics', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { lyrics } = req.body;
 
-  const db = readDB();
-  const song = db.songs.find(s => s.id === id && s.username === req.user.username);
-
-  if (!song) {
-    return res.status(404).json({ error: 'Song not found or unauthorized' });
-  }
+  const song = await Song.findOne({ id, username: req.user.username });
+  if (!song) return res.status(404).json({ error: 'Song not found or unauthorized' });
 
   song.lyrics = lyrics || '';
-  writeDB(db);
+  await song.save();
   res.json(song);
 });
 
