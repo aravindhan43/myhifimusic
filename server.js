@@ -21,6 +21,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1); // Trust Render's proxy to fix rate-limiter ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
 const PORT = process.env.PORT || 5000;
 
 // Enable CORS and JSON parsing
