@@ -101,14 +101,59 @@ const settingsSchema = new mongoose.Schema({
 const Settings = mongoose.model('Settings', settingsSchema);
 
 // --- Database Connection ---
+let dbReady = false;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/myhifimusic';
-mongoose.connect(MONGO_URI)
-  .then(async () => {
-    console.log('MongoDB connected successfully');
-    await migrateLegacyDB();
-    await configureCloudinary();
-  })
-  .catch(err => console.error('MongoDB connection error:', err));
+
+async function connectWithRetry(retries = 5, delay = 3000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await mongoose.connect(MONGO_URI);
+      console.log('MongoDB connected successfully');
+      dbReady = true;
+      await migrateLegacyDB();
+      await configureCloudinary();
+      return;
+    } catch (err) {
+      console.error(`MongoDB connection attempt ${i + 1}/${retries} failed:`, err.message);
+      if (i < retries - 1) {
+        console.log(`Retrying in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  console.error('FATAL: Could not connect to MongoDB after all retries. API will be unavailable.');
+}
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('MongoDB disconnected');
+  dbReady = false;
+});
+mongoose.connection.on('reconnected', () => {
+  console.log('MongoDB reconnected');
+  dbReady = true;
+});
+
+// Health check endpoint (no auth required)
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: dbReady ? 'ok' : 'degraded',
+    db: dbReady ? 'connected' : 'disconnected',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Middleware: block API routes if DB is not ready
+app.use('/api', (req, res, next) => {
+  if (req.path === '/health') return next(); // skip health check
+  if (!dbReady) {
+    return res.status(503).json({ 
+      error: 'Server is starting up. Please wait a moment and try again.',
+      retryAfter: 5
+    });
+  }
+  next();
+});
 
 // --- Legacy Migration ---
 async function migrateLegacyDB() {
@@ -822,6 +867,8 @@ if (fs.existsSync(distPath)) {
   });
 }
 
-app.listen(PORT, () => {
+// Start server and connect to DB
+app.listen(PORT, async () => {
   console.log(`Secure Cloud audio server running on port ${PORT}`);
+  await connectWithRetry();
 });

@@ -115,11 +115,17 @@ export default function LoginScreen({ onLoginSuccess }) {
     setErrorMsg('');
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout for cold starts
+      
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({ username, password }),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
+
       const data = await res.json();
       if (res.ok && data.success) {
         // Save simple token to localStorage
@@ -127,11 +133,17 @@ export default function LoginScreen({ onLoginSuccess }) {
         localStorage.setItem('cloud_lib_user', data.username || username);
         localStorage.setItem('cloud_lib_role', data.role);
         onLoginSuccess();
+      } else if (res.status === 503) {
+        setErrorMsg('Server is starting up. Please wait a few seconds and try again.');
       } else {
         setErrorMsg(data.error || 'Invalid username/email or password.');
       }
     } catch (err) {
-      setErrorMsg('Connection error. Ensure backend server is running.');
+      if (err.name === 'AbortError') {
+        setErrorMsg('Server is waking up (free tier). Please wait a moment and try again.');
+      } else {
+        setErrorMsg('Connection error. The server may be starting up — please try again in a few seconds.');
+      }
     } finally {
       setLoading(false);
     }
