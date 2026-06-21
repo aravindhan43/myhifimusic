@@ -104,10 +104,17 @@ const Settings = mongoose.model('Settings', settingsSchema);
 let dbReady = false;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/myhifimusic';
 
-async function connectWithRetry(retries = 5, delay = 3000) {
+// Log masked URI for debugging (hide password)
+const maskedUri = MONGO_URI.replace(/:([^@]+)@/, ':****@');
+console.log(`MongoDB URI: ${maskedUri}`);
+
+async function connectWithRetry(retries = 10, delay = 5000) {
   for (let i = 0; i < retries; i++) {
     try {
-      await mongoose.connect(MONGO_URI);
+      await mongoose.connect(MONGO_URI, {
+        serverSelectionTimeoutMS: 10000,
+        connectTimeoutMS: 10000,
+      });
       console.log('MongoDB connected successfully');
       dbReady = true;
       await migrateLegacyDB();
@@ -115,6 +122,7 @@ async function connectWithRetry(retries = 5, delay = 3000) {
       return;
     } catch (err) {
       console.error(`MongoDB connection attempt ${i + 1}/${retries} failed:`, err.message);
+      if (err.reason) console.error('Reason:', JSON.stringify(err.reason));
       if (i < retries - 1) {
         console.log(`Retrying in ${delay / 1000}s...`);
         await new Promise(r => setTimeout(r, delay));
@@ -122,6 +130,7 @@ async function connectWithRetry(retries = 5, delay = 3000) {
     }
   }
   console.error('FATAL: Could not connect to MongoDB after all retries. API will be unavailable.');
+  console.error('Please verify: 1) MONGO_URI env var is correct, 2) MongoDB Atlas Network Access allows 0.0.0.0/0, 3) Atlas cluster is not paused');
 }
 
 mongoose.connection.on('disconnected', () => {
