@@ -8,6 +8,8 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
   const [gmailAppPassword, setGmailAppPassword] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState({ status: '', message: '' });
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [emailTestResult, setEmailTestResult] = useState({ status: '', message: '' });
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
@@ -87,6 +89,40 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
     }
   };
 
+  const handleTestEmail = async () => {
+    if (!gmailUser || !gmailAppPassword) {
+      setEmailTestResult({ status: 'error', message: 'Please enter both Gmail address and App Password to test.' });
+      return;
+    }
+
+    setTestingEmail(true);
+    setEmailTestResult({ status: '', message: '' });
+
+    try {
+      const res = await fetch('/api/settings/test-email', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('cloud_lib_session')}`
+        },
+        body: JSON.stringify({
+          gmailUser,
+          gmailAppPassword
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setEmailTestResult({ status: 'success', message: data.message || 'Test email sent successfully! Check your inbox.' });
+      } else {
+        setEmailTestResult({ status: 'error', message: data.error || 'Email test failed. Please verify your App Password.' });
+      }
+    } catch (err) {
+      setEmailTestResult({ status: 'error', message: 'Failed to reach backend email service.' });
+    } finally {
+      setTestingEmail(false);
+    }
+  };
+
   return (
     <div className="settings-container">
       <h2 className="settings-title">Cloud Integration</h2>
@@ -160,7 +196,7 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
           <button 
             type="submit" 
             className="sync-button" 
-            style={{ flex: '1 1 200px', margin: 0 }}
+            style={{ flex: '1 1 180px', margin: 0 }}
             disabled={saving}
           >
             {saving ? <div className="spinner"></div> : 'Save Configuration'}
@@ -169,11 +205,21 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
           <button 
             type="button" 
             className="test-btn" 
-            style={{ flex: '1 1 150px' }}
+            style={{ flex: '1 1 140px' }}
             onClick={handleTestConnection}
             disabled={testing}
           >
-            {testing ? 'Testing...' : 'Test Cloud Connection'}
+            {testing ? 'Testing...' : 'Test Cloudinary'}
+          </button>
+
+          <button 
+            type="button" 
+            className="test-btn" 
+            style={{ flex: '1 1 140px', background: 'rgba(250, 45, 72, 0.1)', borderColor: 'rgba(250, 45, 72, 0.3)', color: '#fa2d48' }}
+            onClick={handleTestEmail}
+            disabled={testingEmail}
+          >
+            {testingEmail ? 'Sending Test...' : 'Test Gmail SMTP'}
           </button>
         </div>
 
@@ -209,6 +255,32 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
               </svg>
             )}
             <span>{testResult.message}</span>
+          </div>
+        )}
+
+        {emailTestResult.message && (
+          <div style={{ 
+            padding: '12px', 
+            borderRadius: '8px', 
+            background: emailTestResult.status === 'success' ? 'rgba(46, 204, 113, 0.15)' : 'rgba(231, 76, 60, 0.15)', 
+            color: emailTestResult.status === 'success' ? '#2ecc71' : '#e74c3c', 
+            fontSize: '13px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            {emailTestResult.status === 'success' ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+            )}
+            <span>{emailTestResult.message}</span>
           </div>
         )}
       </form>

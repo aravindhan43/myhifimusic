@@ -246,6 +246,84 @@ async function configureCloudinary() {
   return false;
 }
 
+async function sendVerificationEmail(email, verificationCode, customUser, customPass) {
+  const settings = await getSettings();
+  let user = customUser || settings.gmailUser || process.env.GMAIL_USER || '';
+  let pass = customPass || settings.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || '';
+  user = user.trim();
+  pass = pass.trim().replace(/\s+/g, ''); // Remove spaces from Google App Password
+
+  if (!user || !pass) {
+    console.log(`✉️ MOCK EMAIL SENT to ${email} (Code: ${verificationCode})`);
+    return { success: true, mocked: true };
+  }
+
+  const emailPayload = {
+    from: `"MyHIF Accounts" <${user}>`,
+    to: email,
+    subject: `${verificationCode} is your MyHIF Verification Code`,
+    text: `Welcome to MyHIF!\n\nYour 6-digit verification code is: ${verificationCode}\n\nPlease enter this code in the app to complete your registration.`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 32px 24px; background: #121212; color: #ffffff; border-radius: 16px; border: 1px solid #282828;">
+        <div style="text-align: center; margin-bottom: 24px;">
+          <h1 style="color: #fa2d48; margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.5px;">MyHIF Music</h1>
+          <p style="color: #a0a0a0; font-size: 14px; margin-top: 6px;">Hi-Res Audio Streaming</p>
+        </div>
+        <div style="background: #1c1c1e; border-radius: 12px; padding: 24px; text-align: center; margin-bottom: 24px;">
+          <p style="color: #e5e5ea; font-size: 15px; margin: 0 0 16px 0;">Here is your account verification code:</p>
+          <div style="font-size: 34px; font-weight: 800; letter-spacing: 8px; color: #ffffff; background: #000000; padding: 16px 20px; border-radius: 10px; display: inline-block; font-family: monospace; border: 1px solid #333;">
+            ${verificationCode}
+          </div>
+          <p style="color: #8e8e93; font-size: 13px; margin: 16px 0 0 0;">This code is valid for 15 minutes.</p>
+        </div>
+        <p style="color: #636366; font-size: 12px; text-align: center; margin: 0;">
+          If you did not request this registration, you can safely ignore this email.
+        </p>
+      </div>
+    `
+  };
+
+  const configs = [
+    {
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      family: 4, // Force IPv4 to prevent ENETUNREACH on Render/cloud containers
+      auth: { user, pass },
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 10000
+    },
+    {
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      family: 4, // Force IPv4
+      auth: { user, pass },
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 10000
+    }
+  ];
+
+  let lastError = null;
+  for (const config of configs) {
+    try {
+      const transporter = nodemailer.createTransport(config);
+      await transporter.sendMail(emailPayload);
+      console.log(`✉️ Real email sent to ${email} via Nodemailer (port ${config.port})`);
+      return { success: true, mocked: false, port: config.port };
+    } catch (err) {
+      console.warn(`SMTP send failed on port ${config.port}:`, err.message);
+      lastError = err;
+    }
+  }
+
+  console.error('All SMTP connection attempts failed. Last error:', lastError?.message);
+  return { success: false, error: lastError?.message || 'Failed to send email' };
+}
+
 // --- SECURE AUTHORIZATION MIDDLEWARE ---
 async function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -339,30 +417,8 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       return res.json({ success: true, message: 'Admin account created successfully.', requiresVerification: false });
     }
     
-    // Try to send real email
-    const settings = await getSettings();
-    const { gmailUser, gmailAppPassword } = settings;
-
-    if (gmailUser && gmailAppPassword) {
-      try {
-        const transporter = nodemailer.createTransport({
-          service: 'gmail',
-          auth: { user: gmailUser, pass: gmailAppPassword }
-        });
-        
-        await transporter.sendMail({
-          from: `"MyHIF Accounts" <${gmailUser}>`,
-          to: email,
-          subject: 'Verify your MyHIF Account',
-          text: `Welcome to MyHIF!\n\nYour verification code is: ${verificationCode}\n\nPlease enter this code in the app to complete your registration.`
-        });
-        console.log(`✉️ Real email sent to ${email} via Nodemailer`);
-      } catch (emailErr) {
-        console.error('Failed to send real email, falling back to mock:', emailErr.message);
-      }
-    } else {
-      console.log(`✉️ MOCK EMAIL SENT to ${email}`);
-    }
+    // Send verification email
+    await sendVerificationEmail(email, verificationCode);
     
     res.json({ success: true, message: 'Verification code sent to email', requiresVerification: true });
   } catch (err) {
@@ -438,13 +494,13 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/users/:username/approve', authenticateAdmin, async (req, res) => {
-  const user = await User.findOneAndUpdate({ username: req.params.username }, { status: 'approved' }, { new: true });
+  const user = await User.findOneAndUpdate({ username: req.params.username }, { status: 'approved' }, { returnDocument: 'after' });
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ success: true, user: { username: user.username, role: user.role, status: user.status } });
 });
 
 app.post('/api/admin/users/:username/reject', authenticateAdmin, async (req, res) => {
-  const user = await User.findOneAndUpdate({ username: req.params.username }, { status: 'rejected' }, { new: true });
+  const user = await User.findOneAndUpdate({ username: req.params.username }, { status: 'rejected' }, { returnDocument: 'after' });
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ success: true, message: 'User rejected' });
 });
@@ -557,6 +613,26 @@ app.post('/api/settings/test', authenticateToken, async (req, res) => {
     console.error('Cloudinary test failed:', err);
     const msg = err.error?.message || err.message || 'Connection test failed. Please verify your credentials.';
     res.status(500).json({ error: msg });
+  }
+});
+
+app.post('/api/settings/test-email', authenticateToken, async (req, res) => {
+  let { gmailUser, gmailAppPassword, recipientEmail } = req.body;
+  gmailUser = gmailUser ? String(gmailUser).trim() : '';
+  gmailAppPassword = gmailAppPassword ? String(gmailAppPassword).trim() : '';
+
+  if (!gmailUser || !gmailAppPassword) {
+    return res.status(400).json({ error: 'Gmail address and App Password are required to test.' });
+  }
+
+  const target = (recipientEmail && String(recipientEmail).trim()) || gmailUser;
+  const testCode = Math.floor(100000 + Math.random() * 900000).toString();
+  const result = await sendVerificationEmail(target, testCode, gmailUser, gmailAppPassword);
+
+  if (result.success && !result.mocked) {
+    res.json({ success: true, message: `Test verification email sent successfully to ${target}!` });
+  } else {
+    res.status(500).json({ error: result.error || 'Failed to send test email. Please verify your Gmail App Password.' });
   }
 });
 
