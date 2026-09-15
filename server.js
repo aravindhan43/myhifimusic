@@ -97,7 +97,9 @@ const settingsSchema = new mongoose.Schema({
   jwtSecret: { type: String, default: '' },
   gmailUser: { type: String, default: '' },
   gmailAppPassword: { type: String, default: '' },
-  resendApiKey: { type: String, default: '' }
+  resendApiKey: { type: String, default: '' },
+  brevoApiKey: { type: String, default: '' },
+  brevoSenderEmail: { type: String, default: '' }
 });
 const Settings = mongoose.model('Settings', settingsSchema);
 
@@ -247,15 +249,15 @@ async function configureCloudinary() {
   return false;
 }
 
-async function sendVerificationEmail(email, verificationCode, customUser, customPass, customResendKey) {
+async function sendVerificationEmail(email, verificationCode, customUser, customPass, customResendKey, customBrevoKey, customBrevoSender) {
   const settings = await getSettings();
+  let brevoApiKey = (customBrevoKey || settings.brevoApiKey || process.env.BREVO_API_KEY || '').trim();
+  let brevoSenderEmail = (customBrevoSender || settings.brevoSenderEmail || process.env.BREVO_SENDER_EMAIL || settings.gmailUser || '').trim();
   let resendApiKey = (customResendKey || settings.resendApiKey || process.env.RESEND_API_KEY || '').trim();
   let user = (customUser || settings.gmailUser || process.env.GMAIL_USER || '').trim();
   let pass = (customPass || settings.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || '').trim().replace(/\s+/g, '');
 
   const emailPayload = {
-    from: `"MyHIF Accounts" <${user || 'onboarding@resend.dev'}>`,
-    to: email,
     subject: `${verificationCode} is your MyHIF Verification Code`,
     text: `Welcome to MyHIF!\n\nYour 6-digit verification code is: ${verificationCode}\n\nPlease enter this code in the app to complete your registration.`,
     html: `
@@ -278,10 +280,46 @@ async function sendVerificationEmail(email, verificationCode, customUser, custom
     `
   };
 
-  // 1. Try Resend API first (Uses HTTPS Port 443 — NEVER blocked on Render Free Tier)
+  // 1. Try Brevo API first (Uses HTTPS Port 443 — 100% Reliable on Render/Cloud)
+  if (brevoApiKey) {
+    try {
+      console.log('Attempting email delivery via Brevo HTTPS API (Port 443)...');
+      const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': brevoApiKey,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          sender: {
+            name: 'MyHIF Music',
+            email: brevoSenderEmail || 'noreply@myhifimusic.com'
+          },
+          to: [{ email }],
+          subject: emailPayload.subject,
+          htmlContent: emailPayload.html,
+          textContent: emailPayload.text
+        })
+      });
+      const brevoData = await brevoRes.json();
+      if (brevoRes.ok) {
+        console.log(`✉️ Real email sent to ${email} via Brevo API (messageId: ${brevoData.messageId})`);
+        return { success: true, mocked: false, provider: 'brevo' };
+      } else {
+        console.warn('Brevo API error:', brevoData);
+        return { success: false, error: brevoData.message || 'Brevo API rejected the request' };
+      }
+    } catch (bErr) {
+      console.warn('Brevo fetch error:', bErr.message);
+      return { success: false, error: bErr.message };
+    }
+  }
+
+  // 2. Try Resend API (HTTPS Port 443)
   if (resendApiKey) {
     try {
-      console.log(`Attempting email delivery via Resend HTTPS API (Port 443)...`);
+      console.log('Attempting email delivery via Resend HTTPS API (Port 443)...');
       const resendRes = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
@@ -308,7 +346,7 @@ async function sendVerificationEmail(email, verificationCode, customUser, custom
     }
   }
 
-  // 2. Try SMTP if Gmail credentials are provided
+  // 3. Fallback to Gmail SMTP if configured
   if (user && pass) {
     const configs = [
       {
@@ -335,7 +373,13 @@ async function sendVerificationEmail(email, verificationCode, customUser, custom
     for (const config of configs) {
       try {
         const transporter = nodemailer.createTransport(config);
-        await transporter.sendMail(emailPayload);
+        await transporter.sendMail({
+          from: `"MyHIF Accounts" <${user}>`,
+          to: email,
+          subject: emailPayload.subject,
+          text: emailPayload.text,
+          html: emailPayload.html
+        });
         console.log(`✉️ Real email sent to ${email} via Nodemailer (port ${config.port})`);
         return { success: true, mocked: false, port: config.port };
       } catch (err) {
@@ -347,7 +391,7 @@ async function sendVerificationEmail(email, verificationCode, customUser, custom
   console.log(`✉️ Verification Code logged: ${verificationCode}`);
   return { 
     success: false, 
-    error: 'Render Free Tier blocks SMTP ports 465/587. Please add your free Resend API key (resend.com) in Settings for instant delivery over HTTPS.' 
+    error: 'No valid Email API configured. Please enter your Brevo API Key in Settings.' 
   };
 }
 
@@ -596,7 +640,7 @@ app.get('/api/settings', authenticateAdmin, async (req, res) => {
 });
 
 app.post('/api/settings', authenticateAdmin, async (req, res) => {
-  const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret, gmailUser, gmailAppPassword, resendApiKey } = req.body;
+  const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret, gmailUser, gmailAppPassword, resendApiKey, brevoApiKey, brevoSenderEmail } = req.body;
   const settings = await getSettings();
   
   if (cloudinaryCloudName !== undefined) settings.cloudinaryCloudName = cloudinaryCloudName.trim();
@@ -605,6 +649,8 @@ app.post('/api/settings', authenticateAdmin, async (req, res) => {
   if (gmailUser !== undefined) settings.gmailUser = gmailUser.trim();
   if (gmailAppPassword !== undefined) settings.gmailAppPassword = gmailAppPassword.trim();
   if (resendApiKey !== undefined) settings.resendApiKey = resendApiKey.trim();
+  if (brevoApiKey !== undefined) settings.brevoApiKey = brevoApiKey.trim();
+  if (brevoSenderEmail !== undefined) settings.brevoSenderEmail = brevoSenderEmail.trim();
   
   await settings.save();
   const configured = await configureCloudinary();
@@ -650,26 +696,26 @@ app.post('/api/settings/test', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/settings/test-email', authenticateToken, async (req, res) => {
-  let { gmailUser, gmailAppPassword, resendApiKey, recipientEmail } = req.body;
+  let { gmailUser, gmailAppPassword, resendApiKey, brevoApiKey, brevoSenderEmail, recipientEmail } = req.body;
   gmailUser = gmailUser ? String(gmailUser).trim() : '';
   gmailAppPassword = gmailAppPassword ? String(gmailAppPassword).trim() : '';
   resendApiKey = resendApiKey ? String(resendApiKey).trim() : '';
+  brevoApiKey = brevoApiKey ? String(brevoApiKey).trim() : '';
+  brevoSenderEmail = brevoSenderEmail ? String(brevoSenderEmail).trim() : '';
 
-  if (!resendApiKey && (!gmailUser || !gmailAppPassword)) {
-    return res.status(400).json({ error: 'Please enter a Resend API Key or Gmail credentials to test.' });
+  if (!brevoApiKey && !resendApiKey && (!gmailUser || !gmailAppPassword)) {
+    return res.status(400).json({ error: 'Please enter a Brevo API Key, Resend API Key, or Gmail credentials to test.' });
   }
 
-  const target = (recipientEmail && String(recipientEmail).trim()) || gmailUser || 'your email';
+  const target = (recipientEmail && String(recipientEmail).trim()) || brevoSenderEmail || gmailUser || 'your email';
   const testCode = Math.floor(100000 + Math.random() * 900000).toString();
-  const result = await sendVerificationEmail(target, testCode, gmailUser, gmailAppPassword, resendApiKey);
+  const result = await sendVerificationEmail(target, testCode, gmailUser, gmailAppPassword, resendApiKey, brevoApiKey, brevoSenderEmail);
 
   if (result.success && !result.mocked) {
-    res.json({ 
-      success: true, 
-      message: result.provider === 'resend' 
-        ? `Test email sent successfully via Resend HTTPS API to ${target}!`
-        : `Test verification email sent successfully to ${target}!` 
-    });
+    let msg = `Test verification email sent successfully to ${target}!`;
+    if (result.provider === 'brevo') msg = `Test email sent successfully via Brevo HTTPS API to ${target}!`;
+    if (result.provider === 'resend') msg = `Test email sent successfully via Resend HTTPS API to ${target}!`;
+    res.json({ success: true, message: msg });
   } else {
     res.status(500).json({ error: result.error || 'Failed to send test email.' });
   }
