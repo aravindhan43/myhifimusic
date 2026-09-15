@@ -265,7 +265,10 @@ export default function UploadModal({ onUploadSuccess, isCloudActive }) {
           })
         });
 
-        if (!res.ok) throw new Error('Cloud sync failed');
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || 'Cloud sync failed');
+        }
 
         updateItemStatus(item.id, 'success');
       } catch (err) {

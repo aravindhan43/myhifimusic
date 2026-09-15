@@ -102,7 +102,7 @@ const Settings = mongoose.model('Settings', settingsSchema);
 
 // --- Database Connection ---
 let dbReady = false;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/myhifimusic';
+const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI || 'mongodb://localhost:27017/myhifimusic';
 
 // Log masked URI for debugging (hide password)
 const maskedUri = MONGO_URI.replace(/:([^@]+)@/, ':****@');
@@ -511,11 +511,11 @@ app.post('/api/settings', authenticateAdmin, async (req, res) => {
   const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret, gmailUser, gmailAppPassword } = req.body;
   const settings = await getSettings();
   
-  if (cloudinaryCloudName !== undefined) settings.cloudinaryCloudName = cloudinaryCloudName;
-  if (cloudinaryApiKey !== undefined) settings.cloudinaryApiKey = cloudinaryApiKey;
-  if (cloudinaryApiSecret !== undefined) settings.cloudinaryApiSecret = cloudinaryApiSecret;
-  if (gmailUser !== undefined) settings.gmailUser = gmailUser;
-  if (gmailAppPassword !== undefined) settings.gmailAppPassword = gmailAppPassword;
+  if (cloudinaryCloudName !== undefined) settings.cloudinaryCloudName = cloudinaryCloudName.trim();
+  if (cloudinaryApiKey !== undefined) settings.cloudinaryApiKey = cloudinaryApiKey.trim();
+  if (cloudinaryApiSecret !== undefined) settings.cloudinaryApiSecret = cloudinaryApiSecret.trim();
+  if (gmailUser !== undefined) settings.gmailUser = gmailUser.trim();
+  if (gmailAppPassword !== undefined) settings.gmailAppPassword = gmailAppPassword.trim();
   
   await settings.save();
   const configured = await configureCloudinary();
@@ -529,7 +529,11 @@ app.post('/api/settings', authenticateAdmin, async (req, res) => {
 });
 
 app.post('/api/settings/test', authenticateToken, async (req, res) => {
-  const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret } = req.body;
+  let { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret } = req.body;
+  cloudinaryCloudName = cloudinaryCloudName ? String(cloudinaryCloudName).trim() : '';
+  cloudinaryApiKey = cloudinaryApiKey ? String(cloudinaryApiKey).trim() : '';
+  cloudinaryApiSecret = cloudinaryApiSecret ? String(cloudinaryApiSecret).trim() : '';
+
   if (!cloudinaryCloudName || !cloudinaryApiKey || !cloudinaryApiSecret) {
     return res.status(400).json({ error: 'All Cloudinary credentials are required' });
   }
@@ -551,7 +555,8 @@ app.post('/api/settings/test', authenticateToken, async (req, res) => {
     res.json({ success: true, message: 'Cloudinary connection successful!' });
   } catch (err) {
     console.error('Cloudinary test failed:', err);
-    res.status(500).json({ error: err.message || 'Connection test failed. Please verify your credentials.' });
+    const msg = err.error?.message || err.message || 'Connection test failed. Please verify your credentials.';
+    res.status(500).json({ error: msg });
   }
 });
 
