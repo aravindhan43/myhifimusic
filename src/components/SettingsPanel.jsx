@@ -6,6 +6,7 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
   const [apiSecret, setApiSecret] = useState('');
   const [gmailUser, setGmailUser] = useState('');
   const [gmailAppPassword, setGmailAppPassword] = useState('');
+  const [resendApiKey, setResendApiKey] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState({ status: '', message: '' });
   const [testingEmail, setTestingEmail] = useState(false);
@@ -20,6 +21,7 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
       setApiSecret(settings.cloudinaryApiSecret || '');
       setGmailUser(settings.gmailUser || '');
       setGmailAppPassword(settings.gmailAppPassword || '');
+      setResendApiKey(settings.resendApiKey || '');
     }
   }, [settings]);
 
@@ -39,7 +41,8 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
           cloudinaryApiKey: apiKey,
           cloudinaryApiSecret: apiSecret,
           gmailUser,
-          gmailAppPassword
+          gmailAppPassword,
+          resendApiKey
         })
       });
       const data = await res.json();
@@ -90,8 +93,8 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
   };
 
   const handleTestEmail = async () => {
-    if (!gmailUser || !gmailAppPassword) {
-      setEmailTestResult({ status: 'error', message: 'Please enter both Gmail address and App Password to test.' });
+    if (!resendApiKey && (!gmailUser || !gmailAppPassword)) {
+      setEmailTestResult({ status: 'error', message: 'Please enter a Resend API Key or Gmail credentials to test.' });
       return;
     }
 
@@ -107,14 +110,15 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
         },
         body: JSON.stringify({
           gmailUser,
-          gmailAppPassword
+          gmailAppPassword,
+          resendApiKey
         })
       });
       const data = await res.json();
       if (res.ok && data.success) {
         setEmailTestResult({ status: 'success', message: data.message || 'Test email sent successfully! Check your inbox.' });
       } else {
-        setEmailTestResult({ status: 'error', message: data.error || 'Email test failed. Please verify your App Password.' });
+        setEmailTestResult({ status: 'error', message: data.error || 'Email test failed.' });
       }
     } catch (err) {
       setEmailTestResult({ status: 'error', message: 'Failed to reach backend email service.' });
@@ -165,13 +169,34 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
           />
         </div>
 
-        <h2 className="settings-title" style={{ marginTop: '20px', fontSize: '20px' }}>Email Verification (SMTP)</h2>
+        <h2 className="settings-title" style={{ marginTop: '20px', fontSize: '20px' }}>Email Verification Setup</h2>
         <p className="settings-desc" style={{ marginBottom: '10px' }}>
-          Configure Gmail to send real 6-digit verification codes to new users. Leave blank to mock emails in the terminal.
+          Configure email delivery to send 6-digit verification codes to new users.
         </p>
 
+        <div className="form-group" style={{ background: 'rgba(250, 45, 72, 0.05)', padding: '16px', borderRadius: '12px', border: '1px solid rgba(250, 45, 72, 0.15)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <label className="form-label" style={{ margin: 0, color: '#ff375f', fontWeight: '700' }}>
+              Resend API Key (Recommended for Render / Cloud)
+            </label>
+            <a href="https://resend.com" target="_blank" rel="noreferrer" style={{ fontSize: '12px', color: '#ff375f', textDecoration: 'underline' }}>
+              Get Free Key at resend.com →
+            </a>
+          </div>
+          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0' }}>
+            Works 100% on Render Free Tier via HTTPS (Port 443). Zero port blocks, 3,000 free emails/month.
+          </p>
+          <input 
+            type="password" 
+            className="form-input" 
+            placeholder="re_123456789abcdef..." 
+            value={resendApiKey} 
+            onChange={(e) => setResendApiKey(e.target.value)}
+          />
+        </div>
+
         <div className="form-group">
-          <label className="form-label">Gmail Address</label>
+          <label className="form-label">Gmail Address (Optional Alternative)</label>
           <input 
             type="email" 
             className="form-input" 
@@ -219,7 +244,7 @@ export default function SettingsPanel({ onSaveSettings, settings }) {
             onClick={handleTestEmail}
             disabled={testingEmail}
           >
-            {testingEmail ? 'Sending Test...' : 'Test Gmail SMTP'}
+            {testingEmail ? 'Sending Test...' : 'Test Email Delivery'}
           </button>
         </div>
 

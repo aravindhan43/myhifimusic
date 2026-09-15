@@ -96,7 +96,8 @@ const settingsSchema = new mongoose.Schema({
   cloudinaryApiSecret: { type: String, default: '' },
   jwtSecret: { type: String, default: '' },
   gmailUser: { type: String, default: '' },
-  gmailAppPassword: { type: String, default: '' }
+  gmailAppPassword: { type: String, default: '' },
+  resendApiKey: { type: String, default: '' }
 });
 const Settings = mongoose.model('Settings', settingsSchema);
 
@@ -246,20 +247,14 @@ async function configureCloudinary() {
   return false;
 }
 
-async function sendVerificationEmail(email, verificationCode, customUser, customPass) {
+async function sendVerificationEmail(email, verificationCode, customUser, customPass, customResendKey) {
   const settings = await getSettings();
-  let user = customUser || settings.gmailUser || process.env.GMAIL_USER || '';
-  let pass = customPass || settings.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || '';
-  user = user.trim();
-  pass = pass.trim().replace(/\s+/g, ''); // Remove spaces from Google App Password
-
-  if (!user || !pass) {
-    console.log(`✉️ MOCK EMAIL SENT to ${email} (Code: ${verificationCode})`);
-    return { success: true, mocked: true };
-  }
+  let resendApiKey = (customResendKey || settings.resendApiKey || process.env.RESEND_API_KEY || '').trim();
+  let user = (customUser || settings.gmailUser || process.env.GMAIL_USER || '').trim();
+  let pass = (customPass || settings.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || '').trim().replace(/\s+/g, '');
 
   const emailPayload = {
-    from: `"MyHIF Accounts" <${user}>`,
+    from: `"MyHIF Accounts" <${user || 'onboarding@resend.dev'}>`,
     to: email,
     subject: `${verificationCode} is your MyHIF Verification Code`,
     text: `Welcome to MyHIF!\n\nYour 6-digit verification code is: ${verificationCode}\n\nPlease enter this code in the app to complete your registration.`,
@@ -283,45 +278,77 @@ async function sendVerificationEmail(email, verificationCode, customUser, custom
     `
   };
 
-  const configs = [
-    {
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      family: 4, // Force IPv4 to prevent ENETUNREACH on Render/cloud containers
-      auth: { user, pass },
-      connectionTimeout: 8000,
-      greetingTimeout: 8000,
-      socketTimeout: 10000
-    },
-    {
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false,
-      requireTLS: true,
-      family: 4, // Force IPv4
-      auth: { user, pass },
-      connectionTimeout: 8000,
-      greetingTimeout: 8000,
-      socketTimeout: 10000
-    }
-  ];
-
-  let lastError = null;
-  for (const config of configs) {
+  // 1. Try Resend API first (Uses HTTPS Port 443 — NEVER blocked on Render Free Tier)
+  if (resendApiKey) {
     try {
-      const transporter = nodemailer.createTransport(config);
-      await transporter.sendMail(emailPayload);
-      console.log(`✉️ Real email sent to ${email} via Nodemailer (port ${config.port})`);
-      return { success: true, mocked: false, port: config.port };
-    } catch (err) {
-      console.warn(`SMTP send failed on port ${config.port}:`, err.message);
-      lastError = err;
+      console.log(`Attempting email delivery via Resend HTTPS API (Port 443)...`);
+      const resendRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: 'MyHIF Music <onboarding@resend.dev>',
+          to: [email],
+          subject: emailPayload.subject,
+          html: emailPayload.html,
+          text: emailPayload.text
+        })
+      });
+      const resendData = await resendRes.json();
+      if (resendRes.ok) {
+        console.log(`✉️ Real email sent to ${email} via Resend HTTPS API (id: ${resendData.id})`);
+        return { success: true, mocked: false, provider: 'resend' };
+      } else {
+        console.warn('Resend API returned error:', resendData);
+      }
+    } catch (rErr) {
+      console.warn('Resend HTTPS request failed:', rErr.message);
     }
   }
 
-  console.error('All SMTP connection attempts failed. Last error:', lastError?.message);
-  return { success: false, error: lastError?.message || 'Failed to send email' };
+  // 2. Try SMTP if Gmail credentials are provided
+  if (user && pass) {
+    const configs = [
+      {
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: { user, pass },
+        connectionTimeout: 5000,
+        greetingTimeout: 5000,
+        socketTimeout: 8000
+      },
+      {
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        requireTLS: true,
+        auth: { user, pass },
+        connectionTimeout: 5000,
+        greetingTimeout: 5000,
+        socketTimeout: 8000
+      }
+    ];
+
+    for (const config of configs) {
+      try {
+        const transporter = nodemailer.createTransport(config);
+        await transporter.sendMail(emailPayload);
+        console.log(`✉️ Real email sent to ${email} via Nodemailer (port ${config.port})`);
+        return { success: true, mocked: false, port: config.port };
+      } catch (err) {
+        console.warn(`SMTP send failed on port ${config.port}:`, err.message);
+      }
+    }
+  }
+
+  console.log(`✉️ Verification Code logged: ${verificationCode}`);
+  return { 
+    success: false, 
+    error: 'Render Free Tier blocks SMTP ports 465/587. Please add your free Resend API key (resend.com) in Settings for instant delivery over HTTPS.' 
+  };
 }
 
 // --- SECURE AUTHORIZATION MIDDLEWARE ---
@@ -494,9 +521,13 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/users/:username/approve', authenticateAdmin, async (req, res) => {
-  const user = await User.findOneAndUpdate({ username: req.params.username }, { status: 'approved' }, { returnDocument: 'after' });
+  const user = await User.findOneAndUpdate(
+    { username: req.params.username },
+    { status: 'approved', isVerified: true },
+    { returnDocument: 'after' }
+  );
   if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ success: true, user: { username: user.username, role: user.role, status: user.status } });
+  res.json({ success: true, user: { username: user.username, role: user.role, status: user.status, isVerified: user.isVerified } });
 });
 
 app.post('/api/admin/users/:username/reject', authenticateAdmin, async (req, res) => {
@@ -509,16 +540,17 @@ app.put('/api/admin/users/:username', authenticateAdmin, async (req, res) => {
   const user = await User.findOne({ username: req.params.username });
   if (!user) return res.status(404).json({ error: 'User not found' });
   
-  const { email, role, status, password } = req.body;
+  const { email, role, status, password, isVerified } = req.body;
   if (email !== undefined) user.email = email;
   if (role !== undefined) user.role = role;
   if (status !== undefined) user.status = status;
+  if (isVerified !== undefined) user.isVerified = isVerified;
   if (password) {
     user.password = await bcrypt.hash(password, 10);
   }
   
   await user.save();
-  res.json({ success: true, user: { username: user.username, email: user.email, role: user.role, status: user.status } });
+  res.json({ success: true, user: { username: user.username, email: user.email, role: user.role, status: user.status, isVerified: user.isVerified } });
 });
 
 app.delete('/api/admin/users/:username', authenticateAdmin, async (req, res) => {
@@ -564,7 +596,7 @@ app.get('/api/settings', authenticateAdmin, async (req, res) => {
 });
 
 app.post('/api/settings', authenticateAdmin, async (req, res) => {
-  const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret, gmailUser, gmailAppPassword } = req.body;
+  const { cloudinaryCloudName, cloudinaryApiKey, cloudinaryApiSecret, gmailUser, gmailAppPassword, resendApiKey } = req.body;
   const settings = await getSettings();
   
   if (cloudinaryCloudName !== undefined) settings.cloudinaryCloudName = cloudinaryCloudName.trim();
@@ -572,6 +604,7 @@ app.post('/api/settings', authenticateAdmin, async (req, res) => {
   if (cloudinaryApiSecret !== undefined) settings.cloudinaryApiSecret = cloudinaryApiSecret.trim();
   if (gmailUser !== undefined) settings.gmailUser = gmailUser.trim();
   if (gmailAppPassword !== undefined) settings.gmailAppPassword = gmailAppPassword.trim();
+  if (resendApiKey !== undefined) settings.resendApiKey = resendApiKey.trim();
   
   await settings.save();
   const configured = await configureCloudinary();
@@ -617,22 +650,28 @@ app.post('/api/settings/test', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/settings/test-email', authenticateToken, async (req, res) => {
-  let { gmailUser, gmailAppPassword, recipientEmail } = req.body;
+  let { gmailUser, gmailAppPassword, resendApiKey, recipientEmail } = req.body;
   gmailUser = gmailUser ? String(gmailUser).trim() : '';
   gmailAppPassword = gmailAppPassword ? String(gmailAppPassword).trim() : '';
+  resendApiKey = resendApiKey ? String(resendApiKey).trim() : '';
 
-  if (!gmailUser || !gmailAppPassword) {
-    return res.status(400).json({ error: 'Gmail address and App Password are required to test.' });
+  if (!resendApiKey && (!gmailUser || !gmailAppPassword)) {
+    return res.status(400).json({ error: 'Please enter a Resend API Key or Gmail credentials to test.' });
   }
 
-  const target = (recipientEmail && String(recipientEmail).trim()) || gmailUser;
+  const target = (recipientEmail && String(recipientEmail).trim()) || gmailUser || 'your email';
   const testCode = Math.floor(100000 + Math.random() * 900000).toString();
-  const result = await sendVerificationEmail(target, testCode, gmailUser, gmailAppPassword);
+  const result = await sendVerificationEmail(target, testCode, gmailUser, gmailAppPassword, resendApiKey);
 
   if (result.success && !result.mocked) {
-    res.json({ success: true, message: `Test verification email sent successfully to ${target}!` });
+    res.json({ 
+      success: true, 
+      message: result.provider === 'resend' 
+        ? `Test email sent successfully via Resend HTTPS API to ${target}!`
+        : `Test verification email sent successfully to ${target}!` 
+    });
   } else {
-    res.status(500).json({ error: result.error || 'Failed to send test email. Please verify your Gmail App Password.' });
+    res.status(500).json({ error: result.error || 'Failed to send test email.' });
   }
 });
 
